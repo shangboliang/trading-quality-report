@@ -19,22 +19,19 @@ python3 scripts/binance_sync.py
 ## 常用命令
 
 ```bash
-# 一键同步（四阶段自动执行）
-python3 scripts/binance_sync.py --symbol BTCUSDT
+# 一键同步
+python3 scripts/binance_sync.py
 
-# 或指定多个币种
-python3 scripts/binance_sync.py --symbols BTCUSDT ETHUSDT
-
-# 增量同步（只拉取新数据）
+# 增量同步
 python3 scripts/binance_sync.py -i --symbol BTCUSDT
 
 # 查看浮动盈亏
 python3 scripts/binance_sync.py --unrealized
 
-# 启动 WebSocket 实时监听
+# 启动监听
 python3 scripts/ws_listener.py
 
-# Demo 模式（无需 API Key）
+# Demo 模式（无需 API）
 python3 scripts/binance_sync_demo.py --symbol BTCUSDT --report
 ```
 
@@ -47,12 +44,6 @@ python3 scripts/binance_sync_demo.py --symbol BTCUSDT --report
 "生成本月交易报告"
 "生成 CFGUSDT 交易报告"
 ```
-
-我会查询数据库，按严格格式输出报告：
-- **综合评级**（A+ ~ F）
-- 核心数据概览
-- 交易质量优缺
-- 潜在隐患与优化空间
 
 ## 架构
 
@@ -77,18 +68,3 @@ Trade (底层) ← /fapi/v1/userTrades
 - ✅ 浮动盈亏追踪
 - ✅ 资金费率记录
 - ✅ WebSocket 实时监听
-- ✅ 虚拟起点对齐（远古仓位）
-
-## 目录结构
-
-```
-scripts/
-├── binance_sync.py       # 数据同步
-├── binance_sync_demo.py  # Demo 模式
-├── position_builder.py   # 仓位构建
-├── trade_stats.py        # 统计分析
-├── report_generator.py   # 报告生成
-├── ws_listener.py        # WebSocket 监听
-├── db.py                 # 数据库
-└── env_loader.py         # 环境变量
-```

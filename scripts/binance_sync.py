@@ -48,6 +48,106 @@ FORCE_ORDER_LIMIT = 100  # forceOrders 最大 limit
 RECV_WINDOW = 5000     # 接收窗口
 FLOAT_EPSILON = 1e-10  # 浮点数比较精度
 
+# Rate Limit 配置
+RATE_LIMIT_BUFFER = 0.8  # 使用 80% 权重时开始等待
+MAX_RETRIES = 3          # 最大重试次数
+
+
+class RateLimitError(Exception):
+    """Rate limit 错误"""
+    pass
+
+
+class IPBanError(Exception):
+    """IP 封禁错误"""
+    pass
+
+
+def api_request(session, method, url, params=None, max_retries=MAX_RETRIES):
+    """
+    统一 API 请求函数，处理 rate limit 和错误重试
+    
+    Args:
+        session: requests.Session
+        method: 'GET' 或 'POST'
+        url: 请求 URL
+        params: 请求参数
+        max_retries: 最大重试次数
+    
+    Returns:
+        requests.Response
+    
+    Raises:
+        RateLimitError: 超出最大重试次数
+        IPBanError: IP 被封禁
+    """
+    for attempt in range(max_retries + 1):
+        try:
+            if method == 'GET':
+                resp = session.get(url, params=params)
+            else:
+                resp = session.post(url, params=params)
+            
+            # 检查 HTTP 状态码
+            if resp.status_code == 200:
+                # 检查权重使用情况
+                _check_weight(resp)
+                return resp
+            
+            elif resp.status_code == 429:
+                # Rate limit exceeded
+                retry_after = int(resp.headers.get('Retry-After', 60))
+                print(f"  Rate limited (429), waiting {retry_after}s... (attempt {attempt + 1}/{max_retries + 1})", 
+                      file=sys.stderr)
+                time.sleep(retry_after + 1)
+                continue
+            
+            elif resp.status_code == 418:
+                # IP banned
+                ban_minutes = _estimate_ban_duration(resp)
+                print(f"  IP banned (418), estimated duration: {ban_minutes} minutes", file=sys.stderr)
+                raise IPBanError(f"IP banned for approximately {ban_minutes} minutes")
+            
+            else:
+                # 其他错误
+                resp.raise_for_status()
+        
+        except requests.exceptions.RequestException as e:
+            if attempt < max_retries:
+                wait_time = 2 ** attempt  # 指数退避
+                print(f"  Request failed: {e}, retrying in {wait_time}s...", file=sys.stderr)
+                time.sleep(wait_time)
+            else:
+                raise
+    
+    raise RateLimitError(f"Max retries ({max_retries}) exceeded")
+
+
+def _check_weight(response):
+    """检查权重使用情况"""
+    used_weight = response.headers.get('X-MBX-USED-WEIGHT-1M')
+    if used_weight:
+        weight = float(used_weight)
+        # 默认限制 2400，使用 80% 时警告
+        if weight > 2400 * RATE_LIMIT_BUFFER:
+            print(f"  ⚠️ Rate limit warning: {weight:.0f}/2400", file=sys.stderr)
+            # 根据权重使用量动态等待
+            if weight > 2400 * 0.9:
+                time.sleep(2)
+            elif weight > 2400 * 0.8:
+                time.sleep(1)
+
+
+def _estimate_ban_duration(response):
+    """估计 IP 封禁时长"""
+    # 418 响应可能包含 Retry-After
+    retry_after = response.headers.get('Retry-After')
+    if retry_after:
+        return int(retry_after) // 60
+    
+    # 默认估计
+    return 2  # 2 分钟
+
 
 def sign_params(params: dict, api_secret: str) -> dict:
     """HMAC SHA256 签名"""
@@ -78,8 +178,9 @@ def get_bnb_price(api_key: str = None, api_secret: str = None) -> float:
         return _bnb_price_cache['price']
     
     try:
-        resp = requests.get(f"{BASE_URL}/fapi/v1/ticker/price", params={'symbol': 'BNBUSDT'})
-        resp.raise_for_status()
+        session = requests.Session()
+        resp = api_request(session, 'GET', f"{BASE_URL}/fapi/v1/ticker/price", 
+                          params={'symbol': 'BNBUSDT'})
         price = float(resp.json()['price'])
         
         _bnb_price_cache['price'] = price
@@ -110,19 +211,12 @@ def convert_commission_to_usdt(commission: float, commission_asset: str,
 
 def detect_liquidation(trade: dict) -> bool:
     """检测是否为强平订单"""
-    # 强平订单特征：
-    # 1. realizedPnl 通常为负数且金额较大
-    # 2. 可能有特殊的标识
-    
-    # 检查是否为负数且金额较大
     pnl = float(trade.get('realizedPnl', 0))
     qty = float(trade.get('qty', 0))
     price = float(trade.get('price', 0))
     
-    # 计算仓位价值
     position_value = qty * price
     
-    # 如果亏损超过仓位价值的 50%，可能是强平
     if pnl < 0 and abs(pnl) > position_value * 0.5:
         return True
     
@@ -140,8 +234,7 @@ def get_position_risk(api_key: str, api_secret: str) -> list:
     
     params = {}
     signed = sign_params(params, api_secret)
-    resp = session.get(f"{BASE_URL}/fapi/v2/positionRisk", params=signed)
-    resp.raise_for_status()
+    resp = api_request(session, 'GET', f"{BASE_URL}/fapi/v2/positionRisk", params=signed)
     
     return [p for p in resp.json() if abs(float(p['positionAmt'])) > FLOAT_EPSILON]
 
@@ -165,8 +258,7 @@ def get_income_history(api_key: str, api_secret: str,
         params['endTime'] = end_time
     
     signed = sign_params(params.copy(), api_secret)
-    resp = session.get(f"{BASE_URL}/fapi/v1/income", params=signed)
-    resp.raise_for_status()
+    resp = api_request(session, 'GET', f"{BASE_URL}/fapi/v1/income", params=signed)
     
     return resp.json()
 
@@ -182,8 +274,7 @@ def get_force_orders(api_key: str, api_secret: str,
         params['symbol'] = symbol
     
     signed = sign_params(params.copy(), api_secret)
-    resp = session.get(f"{BASE_URL}/fapi/v1/forceOrders", params=signed)
-    resp.raise_for_status()
+    resp = api_request(session, 'GET', f"{BASE_URL}/fapi/v1/forceOrders", params=signed)
     
     return resp.json()
 
@@ -234,8 +325,7 @@ def fetch_trades(api_key: str, api_secret: str, symbol: str,
             params['endTime'] = end_time
     
     signed = sign_params(params.copy(), api_secret)
-    resp = session.get(f"{BASE_URL}/fapi/v1/userTrades", params=signed)
-    resp.raise_for_status()
+    resp = api_request(session, 'GET', f"{BASE_URL}/fapi/v1/userTrades", params=signed)
     
     return resp.json()
 
@@ -254,8 +344,7 @@ def fetch_orders(api_key: str, api_secret: str, symbol: str,
         params['endTime'] = end_time
     
     signed = sign_params(params.copy(), api_secret)
-    resp = session.get(f"{BASE_URL}/fapi/v1/allOrders", params=signed)
-    resp.raise_for_status()
+    resp = api_request(session, 'GET', f"{BASE_URL}/fapi/v1/allOrders", params=signed)
     
     return resp.json()
 
@@ -560,26 +649,37 @@ def main():
         print("  方式2: 编辑 .env 文件", file=sys.stderr)
         sys.exit(1)
     
-    if args.discover:
-        symbols = discovery(api_key, api_secret)
-        print(json.dumps(symbols, indent=2))
-    elif args.unrealized:
-        positions = get_unrealized_pnl(api_key, api_secret)
-        if positions:
-            print(json.dumps(positions, indent=2))
+    try:
+        if args.discover:
+            symbols = discovery(api_key, api_secret)
+            print(json.dumps(symbols, indent=2))
+        elif args.unrealized:
+            positions = get_unrealized_pnl(api_key, api_secret)
+            if positions:
+                print(json.dumps(positions, indent=2))
+            else:
+                print("No open positions")
+        elif args.income_only:
+            income_sync(api_key, api_secret, args.symbol)
+        elif args.incremental and args.symbol:
+            incremental_sync(api_key, api_secret, args.symbol)
+        elif args.symbols or args.symbol:
+            symbols = args.symbols or [args.symbol]
+            full_sync(api_key, api_secret, symbols)
         else:
-            print("No open positions")
-    elif args.income_only:
-        income_sync(api_key, api_secret, args.symbol)
-    elif args.incremental and args.symbol:
-        incremental_sync(api_key, api_secret, args.symbol)
-    elif args.symbols or args.symbol:
-        symbols = args.symbols or [args.symbol]
-        full_sync(api_key, api_secret, symbols)
-    else:
-        # 默认：探测并同步所有活跃币种
-        print("未指定币种，自动探测活跃币种...", file=sys.stderr)
-        full_sync(api_key, api_secret)
+            # 默认：探测并同步所有活跃币种
+            print("未指定币种，自动探测活跃币种...", file=sys.stderr)
+            full_sync(api_key, api_secret)
+    
+    except IPBanError as e:
+        print(f"IP Banned: {e}", file=sys.stderr)
+        sys.exit(1)
+    except RateLimitError as e:
+        print(f"Rate Limit Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

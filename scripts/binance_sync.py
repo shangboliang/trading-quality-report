@@ -42,8 +42,9 @@ from position_builder import build_positions
 # 常量定义
 BASE_URL = "https://fapi.binance.com"
 MS_PER_DAY = 86400000  # 1天的毫秒数
-DEFAULT_LIMIT = 1000   # API 默认 limit
-MAX_LIMIT = 500        # 订单 API 最大 limit
+DEFAULT_LIMIT = 1000   # userTrades/income 默认 limit，最大 1000
+MAX_LIMIT = 1000       # allOrders 最大 limit
+FORCE_ORDER_LIMIT = 100  # forceOrders 最大 limit
 RECV_WINDOW = 5000     # 接收窗口
 FLOAT_EPSILON = 1e-10  # 浮点数比较精度
 
@@ -171,7 +172,7 @@ def get_income_history(api_key: str, api_secret: str,
 
 
 def get_force_orders(api_key: str, api_secret: str, 
-                     symbol: str = None, limit: int = 100) -> list:
+                     symbol: str = None, limit: int = FORCE_ORDER_LIMIT) -> list:
     """获取强平订单"""
     session = requests.Session()
     session.headers.update({"X-MBX-APIKEY": api_key})
